@@ -3,20 +3,21 @@ const express = require('express');
 const { Client, middleware } = require('@line/bot-sdk');
 const { Pool } = require('pg');
 
-/* ---------- LINE config ---------- */
+/* ==========================================================
+   1. CONFIG & SETUP
+   ========================================================== */
 const lineConfig = {
   channelAccessToken: process.env.LINE_TOKEN,
   channelSecret: process.env.LINE_SECRET,
 };
 const line = new Client(lineConfig);
 
-/* ---------- Postgres (Neon / Railway) ---------- */
 const pool = new Pool({
   connectionString: process.env.DATABASE_URL,
   ssl: { rejectUnauthorized: false },
 });
 
-// สร้างตาราง (ปรับ amount เป็น NUMERIC เพื่อรับทศนิยม)
+// สร้างตาราง (ใช้ NUMERIC เพื่อรองรับทศนิยม)
 (async () => {
   await pool.query(`
     CREATE TABLE IF NOT EXISTS entries(
@@ -32,57 +33,57 @@ const pool = new Pool({
   console.log('✅ Database ready');
 })().catch(console.error);
 
-/* ---------- Helpers: time & format ---------- */
+/* ==========================================================
+   2. HELPERS (Time, Format, Parse)
+   ========================================================== */
 const TH_TZ = '+07:00'; // เวลาไทย
 
 function pad(n) {
   return n.toString().padStart(2, '0');
 }
 
-// Format เงินให้สวยงาม (มีทศนิยมถ้าจำเป็น)
+// จัดรูปแบบตัวเลข (ถ้ามีทศนิยมให้โชว์, ถ้าไม่มีให้ตัดออก)
 function fmtNum(n) {
   const num = parseFloat(n);
+  // ถ้าเป็นจำนวนเต็ม ให้แสดงแบบไม่มีจุดทศนิยม (เช่น 100)
+  // ถ้ามีเศษ ให้แสดง 2 ตำแหน่ง (เช่น 100.50)
   if (Number.isInteger(num)) return num.toString();
   return num.toFixed(2);
 }
 
-// dayRange นับตามวันไทย (00:00–23:59:59 ที่ +07:00)
+// คำนวณช่วงเวลา (วัน)
 function dayRange(dateStr) {
   const start = new Date(`${dateStr}T00:00:00.000${TH_TZ}`);
   const end   = new Date(`${dateStr}T23:59:59.999${TH_TZ}`);
   return { start: start.toISOString(), end: end.toISOString(), label: dateStr };
 }
 
-// monthRange นับตามเดือนไทย
+// คำนวณช่วงเวลา (เดือน)
 function monthRange(ym) {
   const [y, m] = ym.split('-').map(Number);
   const lastDay = new Date(y, m, 0).getDate();
-
   const start = new Date(`${y}-${pad(m)}-01T00:00:00.000${TH_TZ}`);
   const end   = new Date(`${y}-${pad(m)}-${pad(lastDay)}T23:59:59.999${TH_TZ}`);
-
   return { start: start.toISOString(), end: end.toISOString(), label: `เดือน ${ym}` };
 }
 
-// todayRange ใช้ "วันนี้" ตามเวลาไทย
+// คำนวณช่วงเวลา (วันนี้)
 function todayRange() {
   const now = new Date();
-  const th = new Date(now.getTime() + 7 * 60 * 60 * 1000); // shift เป็นเวลาไทย
+  const th = new Date(now.getTime() + 7 * 60 * 60 * 1000); 
   const ds = `${th.getUTCFullYear()}-${pad(th.getUTCMonth() + 1)}-${pad(th.getUTCDate())}`;
   return dayRange(ds);
 }
 
-// แปลง timestamp เป็นสตริงวันเวลา + เดือน (คิดตามเวลาไทย)
+// แปลง Timestamp เป็นข้อความอ่านง่าย
 function toYMDHM(ts) {
   const base = new Date(ts);
-  const d = new Date(base.getTime() + 7 * 60 * 60 * 1000); // shift เป็นเวลาไทย
-
+  const d = new Date(base.getTime() + 7 * 60 * 60 * 1000); 
   const y  = d.getUTCFullYear();
   const m  = pad(d.getUTCMonth() + 1);
   const dd = pad(d.getUTCDate());
   const hh = pad(d.getUTCHours());
   const mm = pad(d.getUTCMinutes());
-
   return {
     ym: `${y}-${m}`,
     ymdhm: `${y}-${m}-${dd} ${hh}:${mm}`,
@@ -95,12 +96,11 @@ function splitChunks(str, size = 1800) {
   return out;
 }
 
-/* ---------- Parse user input ---------- */
+// แปลงข้อความที่ User พิมพ์ เป็นคำสั่ง
 function parseMessage(text) {
   const t = text.trim();
 
-  // บันทึก: รองรับทศนิยม (เช่น 100.50)
-  // Regex: จับตัวเลขที่เป็น int หรือ float
+  // 1. บันทึกรายการ (รองรับทศนิยม เช่น "กลาง 100.50")
   let m = t.match(/^(กลาง|ส่วนตัว)\s*([0-9]+(?:\.[0-9]+)?)\s*(.*)?$/i);
   if (m) {
     return {
@@ -110,34 +110,36 @@ function parseMessage(text) {
     };
   }
 
-  // ลบรายการ
+  // 2. ลบรายการ
   m = t.match(/^ลบ\s*#?(\d+)$/i);
   if (m) return { cmd: 'del', id: +m[1] };
 
-  // สรุป (ช่วงเวลา)
+  // 3. สรุป (ทุกรูปแบบ)
   if (/^สรุปวันนี้$/i.test(t)) return { cmd: 'sum', scope: 'today' };
-  m = t.match(/^สรุป\s+(\d{4}-\d{2}-\d{2})$/i);
+  m = t.match(/^สรุป\s+(\d{4}-\d{2}-\d{2})$/i); // สรุป YYYY-MM-DD
   if (m) return { cmd: 'sum', scope: 'day', date: m[1] };
-  m = t.match(/^สรุปเดือน\s+(\d{4}-\d{2})$/i);
+  m = t.match(/^สรุปเดือน\s+(\d{4}-\d{2})$/i);   // สรุป YYYY-MM
   if (m) return { cmd: 'sum', scope: 'month', ym: m[1] };
-
-  // สรุปทั้งหมด (ทุกเดือน)
   if (/^สรุปทั้งหมด$/i.test(t)) return { cmd: 'sum_all' };
 
-  // ดูรายการทั้งหมด
+  // 4. ดูรายการ
   m = t.match(/^ดูรายการทั้งหมด(?:\s*(\d+))?$/i);
   if (m) return { cmd: 'list_all', limit: m[1] ? +m[1] : 300 };
 
   return null;
 }
 
-/* ---------- Aggregation & DB helpers ---------- */
-function aggregate(rows) {
-  // pg driver อาจคืนค่า numeric เป็น string จึงต้อง parseFloat เสมอ
+/* ==========================================================
+   3. LOGIC (DB & Calculation)
+   ========================================================== */
+
+async function aggregate(rows) {
+  // รวมเงินกองกลาง
   const center = rows
     .filter((r) => r.type === 'center')
     .reduce((a, b) => a + parseFloat(b.amount), 0);
 
+  // รวมเงินส่วนตัว (Advance) แยกรายคน
   const per = {};
   for (const r of rows) {
     if (r.type === 'advance') {
@@ -146,24 +148,23 @@ function aggregate(rows) {
     }
   }
   const advanceSum = Object.values(per).reduce((a, b) => a + b, 0);
+  
   return { center, per, advanceSum, total: center + advanceSum };
 }
 
+// ดึงข้อมูลตามช่วงเวลา
 async function sumByRange(groupId, startISO, endISO) {
   const r = await pool.query(
-    `SELECT user_id, type, amount
-       FROM entries
-      WHERE group_id=$1 AND ts BETWEEN $2 AND $3`,
+    `SELECT user_id, type, amount FROM entries WHERE group_id=$1 AND ts BETWEEN $2 AND $3`,
     [groupId, startISO, endISO]
   );
   return aggregate(r.rows);
 }
 
+// ดึงข้อมูลทั้งหมด
 async function sumAll(groupId) {
   const r = await pool.query(
-    `SELECT user_id, type, amount
-       FROM entries
-      WHERE group_id=$1`,
+    `SELECT user_id, type, amount FROM entries WHERE group_id=$1`,
     [groupId]
   );
   return aggregate(r.rows);
@@ -171,17 +172,13 @@ async function sumAll(groupId) {
 
 async function listAllEntries(groupId, limit = 300) {
   const r = await pool.query(
-    `SELECT id, user_id, type, amount, note, ts
-       FROM entries
-      WHERE group_id=$1
-      ORDER BY ts ASC
-      LIMIT $2`,
+    `SELECT id, user_id, type, amount, note, ts FROM entries WHERE group_id=$1 ORDER BY ts ASC LIMIT $2`,
     [groupId, limit]
   );
   return r.rows;
 }
 
-/* ---------- Settlement helper (หารส่วนตัวให้เท่ากัน) ---------- */
+// คำนวณใครจ่ายให้ใคร (Clearing House)
 function computeSettlement(per) {
   const ids = Object.keys(per);
   if (!ids.length) return { shareText: '0', transfers: [] };
@@ -190,18 +187,14 @@ function computeSettlement(per) {
   const n = ids.length;
   const share = total / n;
   
-  // Nets: ใครจ่ายเกิน (+) หรือจ่ายขาด (-)
-  const nets = ids.map((id) => ({
-    id,
-    net: per[id] - share, 
-  }));
+  // ใครจ่ายเกิน (+) หรือจ่ายขาด (-)
+  const nets = ids.map((id) => ({ id, net: per[id] - share }));
 
   const creditors = nets.filter((x) => x.net > 0).sort((a, b) => b.net - a.net);
   const debtors = nets.filter((x) => x.net < 0).sort((a, b) => a.net - b.net);
 
   const transfers = [];
-  let i = 0;
-  let j = 0;
+  let i = 0, j = 0;
 
   while (i < creditors.length && j < debtors.length) {
     const c = creditors[i];
@@ -210,11 +203,7 @@ function computeSettlement(per) {
     const clean = Math.round(amount * 100) / 100;
 
     if (clean > 0.005) {
-      transfers.push({
-        from: d.id,
-        to: c.id,
-        amount: clean,
-      });
+      transfers.push({ from: d.id, to: c.id, amount: clean });
     }
     c.net -= amount;
     d.net += amount;
@@ -226,7 +215,9 @@ function computeSettlement(per) {
   return { shareText: fmtNum(share), transfers };
 }
 
-/* ---------- Name cache ---------- */
+/* ==========================================================
+   4. NAME CACHE (ดึงชื่อ User จาก LINE)
+   ========================================================== */
 const nameCache = new Map();
 
 async function getDisplayName(source, userId) {
@@ -269,12 +260,13 @@ function groupByMonth(rows) {
   return bucket;
 }
 
-/* ---------- Express app ---------- */
+/* ==========================================================
+   5. EXPRESS SERVER & HANDLERS
+   ========================================================== */
 const app = express();
 app.get('/', (_, res) => res.send('ok'));
 
 app.post('/webhook', middleware(lineConfig), async (req, res) => {
-  // ใช้ try-catch กันบอทล่มเวลามี Error แปลกๆ
   try {
     await Promise.all(req.body.events.map(handleEvent));
   } catch (err) {
@@ -291,65 +283,49 @@ async function handleEvent(event) {
   const uid = source.userId;
   const p = parseMessage(event.message.text);
 
-  // 🧾 Help text
+  // 0. Help / คู่มือ
   if (!p) {
-    // แสดง Help เฉพาะพิมพ์คำว่า "คู่มือ" หรือ "help" เพื่อไม่ให้รก (หรือจะลบเงื่อนไขนี้เพื่อให้เด้งตลอดก็ได้)
-    if (!/^(คู่มือ|help|วิธีใช้)$/i.test(event.message.text.trim())) return;
-    
-    const help = [
-      '📒 คู่มือจดเงิน (รองรับทศนิยม)',
-      '',
-      '➕ บันทึก',
-      '• กลาง100.50 ค่าน้ำ',
-      '• ส่วนตัว120 กาแฟ',
-      '• ส่วนตัว0 ชื่อ (หลอกระบบให้นับคนหาร)',
-      '',
-      '📊 สรุป',
-      '• สรุปวันนี้',
-      '• สรุป 2025-11-04',
-      '• สรุปเดือน 2025-11',
-      '• สรุปทั้งหมด',
-      '',
-      '🧾 รายการ',
-      '• ดูรายการทั้งหมด',
-      '• ลบ #123',
-    ].join('\n');
-    return line.replyMessage(event.replyToken, { type: 'text', text: help });
+    if (/^(คู่มือ|help|วิธีใช้)$/i.test(event.message.text.trim())) {
+      const help = [
+        '📒 วิธีใช้',
+        '• กลาง 100 ค่าน้ำ',
+        '• ส่วนตัว 120.50 ข้าว',
+        '• ส่วนตัว 0 ชื่อ (เพื่อเพิ่มคนหาร)',
+        '• สรุปวันนี้ / สรุปเดือน 2025-11 / สรุปทั้งหมด',
+        '• ลบ #123',
+        '• ดูรายการทั้งหมด'
+      ].join('\n');
+      return line.replyMessage(event.replyToken, { type: 'text', text: help });
+    }
+    return;
   }
 
   try {
-    // ➕ บันทึก
+    // 1. บันทึก
     if (p.type) {
       const r = await pool.query(
-        `INSERT INTO entries (group_id,user_id,type,amount,note)
-         VALUES ($1,$2,$3,$4,$5) RETURNING id`,
+        `INSERT INTO entries (group_id,user_id,type,amount,note) VALUES ($1,$2,$3,$4,$5) RETURNING id`,
         [gid, uid, p.type, p.amount, p.note]
       );
-      const id = r.rows[0].id;
       const label = p.type === 'center' ? 'บัญชีกลาง' : 'ส่วนตัวออกก่อน';
       return line.replyMessage(event.replyToken, {
         type: 'text',
-        text: `บันทึกแล้ว #${id} · ${label} · ${fmtNum(p.amount)} · ${p.note || '-'}`,
+        text: `บันทึกแล้ว #${r.rows[0].id} · ${label} · ${fmtNum(p.amount)} · ${p.note || '-'}`
       });
     }
 
-    // 🗑️ ลบ
+    // 2. ลบ
     if (p.cmd === 'del') {
-      const r = await pool.query(
-        `DELETE FROM entries WHERE id=$1 AND group_id=$2`,
-        [p.id, gid]
-      );
-      const ok = r.rowCount > 0;
+      const r = await pool.query(`DELETE FROM entries WHERE id=$1 AND group_id=$2`, [p.id, gid]);
       return line.replyMessage(event.replyToken, {
         type: 'text',
-        text: ok ? `ลบรายการ #${p.id} แล้ว` : `ไม่พบรายการ #${p.id}`,
+        text: r.rowCount > 0 ? `ลบรายการ #${p.id} แล้ว` : `ไม่พบรายการ #${p.id}`
       });
     }
 
-    // 📊 สรุป (รวม Logic)
+    // 3. สรุป (Logic เดียว ครอบคลุมทุกคำสั่งสรุป)
     if (p.cmd === 'sum' || p.cmd === 'sum_all') {
-      let data;
-      let title;
+      let data, title;
 
       if (p.cmd === 'sum_all') {
         data = await sumAll(gid);
@@ -358,7 +334,7 @@ async function handleEvent(event) {
         let range;
         if (p.scope === 'today') range = todayRange();
         else if (p.scope === 'day') range = dayRange(p.date);
-        else range = monthRange(p.ym);
+        else range = monthRange(p.ym); // scope='month'
         
         data = await sumByRange(gid, range.start, range.end);
         title = range.label;
@@ -366,16 +342,15 @@ async function handleEvent(event) {
 
       const { center, per, advanceSum, total } = data;
 
-      // ออกก่อนรายคน
+      // สร้างลิสต์คนจ่าย (Advance)
       const lines = [];
       for (const [id, sum] of Object.entries(per)) {
         const name = await getDisplayName(source, id);
         lines.push(`• ${name}: ${fmtNum(sum)}`);
       }
 
-      // คำนวณเคลียร์บัญชี
+      // คำนวณการโอน (Settlement)
       const { shareText, transfers } = computeSettlement(per);
-
       const transferLines = [];
       for (const t of transfers) {
         const fromName = await getDisplayName(source, t.from);
@@ -383,6 +358,7 @@ async function handleEvent(event) {
         transferLines.push(`• ${fromName} → ${toName}: ${fmtNum(t.amount)}`);
       }
 
+      // Format ข้อความตอบกลับ (ตามที่คุณต้องการ)
       const text = `📊 สรุป: ${title}
 กลางรวม: ${fmtNum(center)}
 รวมส่วนตัว (advance): ${fmtNum(advanceSum)}
@@ -400,31 +376,23 @@ ${transferLines.length ? transferLines.join('\n') : '• -'}
       return line.replyMessage(event.replyToken, { type: 'text', text });
     }
 
-    // 🧾 ดูรายการทั้งหมด
+    // 4. ดูรายการทั้งหมด
     if (p.cmd === 'list_all') {
       const limit = Math.max(1, Math.min(p.limit || 300, 2000));
       const rows = await listAllEntries(gid, limit);
-      if (!rows.length) {
-        return line.replyMessage(event.replyToken, {
-          type: 'text',
-          text: 'ยังไม่มีรายการ',
-        });
-      }
+      if (!rows.length) return line.replyMessage(event.replyToken, { type: 'text', text: 'ยังไม่มีรายการ' });
 
       const withNames = await hydrateNames(rows, source);
       const grouped = groupByMonth(withNames);
       const months = Object.keys(grouped).sort();
 
-      let text = '🧾 รายการล่าสุด (' + rows.length + ')\n';
-
+      let text = `🧾 รายการล่าสุด (${rows.length})\n`;
       for (const ym of months) {
         text += `\n📅 ${ym}\n`;
         for (const r of grouped[ym]) {
           const { ymdhm } = toYMDHM(r.ts);
           const tag = r.type === 'center' ? 'กลาง' : 'ส่วนตัว';
-          text += `- ${ymdhm} #${r.id} ${tag} ${fmtNum(r.amount)} ${r.display} ${
-            r.note || ''
-          }\n`;
+          text += `- ${ymdhm} #${r.id} ${tag} ${fmtNum(r.amount)} ${r.display} ${r.note || ''}\n`;
         }
       }
 
@@ -432,16 +400,12 @@ ${transferLines.length ? transferLines.join('\n') : '• -'}
       const messages = chunks.map((c) => ({ type: 'text', text: c }));
       return line.replyMessage(event.replyToken, messages);
     }
-    
+
   } catch (error) {
     console.error('Logic Error:', error);
-    return line.replyMessage(event.replyToken, { 
-        type: 'text', 
-        text: '❌ เกิดข้อผิดพลาดในระบบ: ' + error.message 
-    });
+    return line.replyMessage(event.replyToken, { type: 'text', text: '❌ เกิดข้อผิดพลาด: ' + error.message });
   }
 }
 
-/* ---------- Start Server ---------- */
 const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => console.log('🚀 listening on', PORT));
