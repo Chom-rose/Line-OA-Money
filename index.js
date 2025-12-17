@@ -17,46 +17,21 @@ const pool = new Pool({
   ssl: { rejectUnauthorized: false },
 });
 
-/* ==========================================================
-   DATABASE MIGRATION & INIT (โซนแก้ Database)
-   ========================================================== */
+// เพิ่ม 'debt' ใน CHECK constraint ของตาราง
 (async () => {
-  try {
-    console.log('🔄 Checking Database Structure...');
-
-    // 1. สร้างตารางถ้ายังไม่มี (สำหรับคนเริ่มใหม่)
-    await pool.query(`
-      CREATE TABLE IF NOT EXISTS entries(
-        id SERIAL PRIMARY KEY,
-        group_id TEXT NOT NULL,
-        user_id  TEXT NOT NULL,
-        type     TEXT NOT NULL, 
-        amount   NUMERIC(10,2) NOT NULL,
-        note     TEXT,
-        ts       TIMESTAMPTZ DEFAULT NOW()
-      );
-    `);
-
-    // 2. ปรับปรุงตารางเดิม (MIGRATION)
-    // - เปลี่ยน amount ให้รับทศนิยมได้ (ถ้าของเดิมเป็น int จะ error)
-    await pool.query(`ALTER TABLE entries ALTER COLUMN amount TYPE NUMERIC(10,2);`);
-    
-    // - แก้กฎ (Constraint) ให้รองรับ 'debt' (ติดเงิน)
-    //   ต้องลบกฎเก่าออกก่อน (ชื่อ default มักจะเป็น entries_type_check)
-    await pool.query(`ALTER TABLE entries DROP CONSTRAINT IF EXISTS entries_type_check;`);
-    //   สร้างกฎใหม่
-    await pool.query(`
-      ALTER TABLE entries 
-      ADD CONSTRAINT entries_type_check 
-      CHECK (type IN ('center','advance','debt'));
-    `);
-
-    console.log('✅ Database is ready & Updated (Decimal & Debt support)');
-  } catch (err) {
-    console.error('⚠️ Database Warning:', err.message);
-    // โปรแกรมจะทำงานต่อได้แม้จะมี Warning (เช่น กรณีแก้ไปแล้ว)
-  }
-})();
+  await pool.query(`
+    CREATE TABLE IF NOT EXISTS entries(
+      id SERIAL PRIMARY KEY,
+      group_id TEXT NOT NULL,
+      user_id  TEXT NOT NULL,
+      type     TEXT CHECK(type IN ('center','advance','debt')) NOT NULL,
+      amount   NUMERIC(10,2) NOT NULL,
+      note     TEXT,
+      ts       TIMESTAMPTZ DEFAULT NOW()
+    );
+  `);
+  console.log('✅ Database ready (Decimal & Debt support)');
+})().catch(console.error);
 
 /* ==========================================================
    2. HELPERS (Time, Format, Parse)
@@ -109,6 +84,7 @@ function splitChunks(str, size = 1800) {
   return out;
 }
 
+// ปรับปรุงการดักจับข้อความให้รองรับทศนิยมและ "ติดเงิน"
 function parseMessage(text) {
   const t = text.trim();
 
@@ -122,7 +98,7 @@ function parseMessage(text) {
     if (amount !== undefined) return { type: 'debt', amount, note: note || 'ไม่ระบุชื่อ' };
   }
 
-  // บันทึกรายการ
+  // บันทึกรายการ (แก้ Regex ให้รองรับทศนิยม)
   m = t.match(/^(กลาง|ส่วนตัว)\s*([0-9]*\.?[0-9]+)\s*(.*)?$/i);
   if (m) {
     return {
@@ -132,7 +108,7 @@ function parseMessage(text) {
     };
   }
 
-  // คำสั่งสรุปต่างๆ
+  // คำสั่งสรุปต่างๆ (คงเดิมตามชุดแรก)
   m = t.match(/^ลบ\s*#?(\d+)$/i);
   if (m) return { cmd: 'del', id: parseInt(m[1]) };
   if (/^สรุปวันนี้$/i.test(t)) return { cmd: 'sum', scope: 'today' };
@@ -242,7 +218,7 @@ async function handleEvent(event) {
       return line.replyMessage(event.replyToken, { type: 'text', text: `ลบรายการ #${p.id} แล้ว` });
     }
 
-    // 3. สรุป
+    // 3. สรุป (รายวัน/รายเดือน/ทั้งหมด)
     if (p.cmd === 'sum' || p.cmd === 'sum_all') {
       let rows, title;
       if (p.cmd === 'sum_all') {
@@ -271,7 +247,7 @@ async function handleEvent(event) {
       return line.replyMessage(event.replyToken, { type: 'text', text });
     }
 
-    // 4. ดูรายการ
+    // 4. ดูรายการ (คงเดิม)
     if (p.cmd === 'list_all') {
       const r = await pool.query(`SELECT * FROM entries WHERE group_id=$1 ORDER BY ts ASC LIMIT $2`, [gid, p.limit]);
       if (!r.rows.length) return line.replyMessage(event.replyToken, { type: 'text', text: 'ยังไม่มีรายการ' });
