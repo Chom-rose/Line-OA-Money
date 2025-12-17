@@ -18,7 +18,7 @@ const pool = new Pool({
 });
 
 /* ==========================================================
-   DATABASE MIGRATION & INIT
+   DATABASE INIT
    ========================================================== */
 (async () => {
   try {
@@ -35,7 +35,6 @@ const pool = new Pool({
       );
     `);
     
-    // Migration: รองรับทศนิยมและประเภทหนี้สิน
     await pool.query(`ALTER TABLE entries ALTER COLUMN amount TYPE NUMERIC(10,2);`);
     await pool.query(`ALTER TABLE entries DROP CONSTRAINT IF EXISTS entries_type_check;`);
     await pool.query(`
@@ -45,9 +44,7 @@ const pool = new Pool({
     `);
 
     console.log('✅ Database is ready');
-  } catch (err) {
-    console.error('⚠️ Database Warning:', err.message);
-  }
+  } catch (err) { console.error('⚠️ Database Warning:', err.message); }
 })();
 
 /* ==========================================================
@@ -94,7 +91,7 @@ function parseMessage(text) {
   const t = text.trim();
   const parts = t.split(/\s+/);
 
-  // 1. ระบบติดเงิน (ยืมเงินเรา)
+  // 1. ระบบติดเงิน
   const debtIndex = parts.indexOf('ติด');
   if (debtIndex !== -1) {
     const numIndex = parts.findIndex(p => !isNaN(parseFloat(p)));
@@ -137,7 +134,6 @@ async function aggregate(rows) {
   const center = rows.filter(r => r.type === 'center').reduce((a, b) => a + parseFloat(b.amount), 0);
   const debts = rows.filter(r => r.type === 'debt');
   
-  // คำนวณยอดที่แต่ละคนออกให้ก่อน (Advance)
   const per = {};
   for (const r of rows) {
     if (r.type === 'advance') {
@@ -146,9 +142,6 @@ async function aggregate(rows) {
     }
   }
   const advanceSum = Object.values(per).reduce((a, b) => a + b, 0);
-  
-  // หมายเหตุ: Logic นี้จะรวม 'กลาง' เข้าไปในยอดรวมด้วย
-  // แต่ตอนเคลียร์เงิน (Transfers) จะคิดเฉพาะส่วนที่คนออกให้ก่อน
   return { center, per, advanceSum, total: center + advanceSum, debts };
 }
 
@@ -156,8 +149,8 @@ function computeSettlement(per) {
   const ids = Object.keys(per);
   if (!ids.length) return { shareText: '0', transfers: [] };
   
-  const totalPaidByPeople = ids.reduce((s, id) => s + per[id], 0);
-  const share = totalPaidByPeople / ids.length; // หารเฉพาะยอดที่คนออกเอง
+  const total = ids.reduce((s, id) => s + per[id], 0);
+  const share = total / ids.length;
   
   const nets = ids.map((id) => ({ id, net: per[id] - share }));
   const creditors = nets.filter((x) => x.net > 0).sort((a, b) => b.net - a.net);
@@ -210,21 +203,18 @@ async function handleEvent(event) {
   const gid = event.source.groupId || event.source.userId;
   const p = parseMessage(event.message.text);
 
-  // --- แสดงคู่มือ (แก้ไขใหม่) ---
   if (!p) {
     if (/^(คู่มือ|help|วิธีใช้)$/i.test(event.message.text.trim())) {
       const help = 
 `📒 **คู่มือการใช้งาน**
 ------------------
-1. **บันทึกรายจ่าย**
-   • "กลาง 100 ค่าน้ำ"
-     (ใช้เงินกองกลางจ่าย)
-   • "ส่วนตัว 50 ขนม"
-     (เราออกเงินให้ก่อน / หารทุกคน)
+1. **หารค่าใช้จ่าย**
+   • "กลาง 100 ค่าน้ำ" (กองกลางจ่าย)
+   • "ส่วนตัว 50 ขนม" (ออกก่อน/หารคืน)
 
-2. **บันทึกคนติดเงิน** (ยืมเงินเรา)
-   • "Fia ติด 500 ซูชิโระ"
-   • "ติด แมว 20 ค่ารถ"
+2. **ระบบติดหนี้**
+   • "Fia ติด 500"
+   • "ติด แมว 20"
 
 3. **ดูสรุป**
    • "สรุปวันนี้"
@@ -234,7 +224,6 @@ async function handleEvent(event) {
 4. **อื่นๆ**
    • "ดูรายการทั้งหมด"
    • "ลบ #12"`;
-      
       return line.replyMessage(event.replyToken, { type: 'text', text: help });
     }
     return;
@@ -244,14 +233,10 @@ async function handleEvent(event) {
     // 1. บันทึก
     if (p.type) {
       const r = await pool.query(`INSERT INTO entries (group_id,user_id,type,amount,note) VALUES ($1,$2,$3,$4,$5) RETURNING id`, [gid, event.source.userId, p.type, p.amount, p.note]);
-      
-      // แปลง tag ให้ตรงความหมายใหม่
       const tags = { center: '💸 กองกลางจ่าย', advance: '🙋‍♂️ ออกให้ก่อน', debt: '📝 ติดเงินเรา' };
-      
       let replyText = `บันทึกแล้ว #${r.rows[0].id} · ${tags[p.type]}`;
       if (p.type === 'debt') replyText += ` (ลูกหนี้: ${p.note})`;
       replyText += ` · ${fmtNum(p.amount)}`;
-      
       return line.replyMessage(event.replyToken, { type: 'text', text: replyText });
     }
 
@@ -261,7 +246,7 @@ async function handleEvent(event) {
       return line.replyMessage(event.replyToken, { type: 'text', text: `ลบรายการ #${p.id} แล้ว` });
     }
 
-    // 3. สรุป
+    // 3. สรุป (ปรับปรุงใหม่ตามที่ขอ)
     if (p.cmd === 'sum' || p.cmd === 'sum_all') {
       let rows, title;
       if (p.cmd === 'sum_all') {
@@ -274,9 +259,18 @@ async function handleEvent(event) {
       }
 
       const { center, per, advanceSum, total, debts } = await aggregate(rows);
-      // ตรงนี้สำคัญ: คำนวณเคลียร์เงินเฉพาะยอด "ส่วนตัว (ออกก่อน)" เท่านั้น
       const { shareText, transfers } = computeSettlement(per);
       
+      // --- สร้างลิสต์รายการคนออกก่อน (Payer List) ---
+      const payerLines = [];
+      const payerIds = Object.keys(per).sort((a, b) => per[b] - per[a]); // เรียงตามยอดเงินมาก->น้อย
+      for (const id of payerIds) {
+        const name = await getDisplayName(event.source, id);
+        payerLines.push(`• ${name}: ${fmtNum(per[id])}`);
+      }
+      const peopleCount = payerIds.length;
+
+      // สร้างลิสต์รายการโอนคืน
       const transferLines = [];
       for (const t of transfers) {
         const from = await getDisplayName(event.source, t.from);
@@ -284,6 +278,7 @@ async function handleEvent(event) {
         transferLines.push(`• ${from} → ${to}: ${fmtNum(t.amount)}`);
       }
 
+      // สร้างลิสต์รายการติดหนี้
       const debtSum = debts.reduce((a, b) => { 
         const name = b.note || 'ไม่ระบุชื่อ';
         a[name] = (a[name] || 0) + parseFloat(b.amount); 
@@ -291,13 +286,22 @@ async function handleEvent(event) {
       }, {});
       const debtLines = Object.entries(debtSum).map(([n, v]) => `• ${n}: ${fmtNum(v)}`);
 
+      // จัดรูปแบบข้อความตอบกลับ
       const text = `📊 สรุป: ${title}\n` +
-                   `ใช้กองกลาง: ${fmtNum(center)}\n` +
-                   `คนออกก่อนรวม: ${fmtNum(advanceSum)}\n` +
-                   `ยอดใช้จ่ายรวม: ${fmtNum(total)}\n\n` +
+                   `กลางรวม: ${fmtNum(center)}\n` +
+                   `รวมส่วนตัว (advance): ${fmtNum(advanceSum)}\n` +
+                   `รวมทั้งหมด: ${fmtNum(total)}\n` +
+                   `เฉลี่ยส่วนตัวต่อคน (${peopleCount} คน): ${shareText}\n\n` +
+
+                   `รายการคนออกก่อน:\n` +
+                   `${payerLines.length ? payerLines.join('\n') : '-'}\n\n` +
+
+                   `🤝 เคลียร์บัญชี (คืนคนออกก่อน):\n${transferLines.length ? transferLines.join('\n') : '-'}\n\n` +
+
                    `💸 ติดเงินเรา (ยืม):\n${debtLines.length ? debtLines.join('\n') : '-'}\n\n` +
-                   `🤝 เคลียร์บัญชี (คืนคนออกก่อน):\n${transferLines.length ? transferLines.join('\n') : '-'}`;
                    
+                   `*หมายเหตุ: ระบบหารเฉพาะคนที่มีรายการจ่าย ถ้าใครไม่ได้จ่ายแต่ต้องหาร ให้พิมพ์ "ส่วนตัว 0"`;
+
       return line.replyMessage(event.replyToken, { type: 'text', text });
     }
 
