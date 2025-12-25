@@ -293,21 +293,17 @@ async function handleEvent(event) {
 
       const text = `📊 สรุป: ${title}\n` +
                    `กลางรวม: ${fmtNum(center)}\n` +
-                   `รวมส่วนตัว (advance): ${fmtNum(advanceSum)}\n` +
+                   `รวมส่วนตัว: ${fmtNum(advanceSum)}\n` +
                    `รวมทั้งหมด: ${fmtNum(total)}\n` +
                    `เฉลี่ยส่วนตัวต่อคน (${peopleCount} คน): ${shareText}\n\n` +
 
                    `รายการคนออกก่อน:\n` +
                    `${payerLines.length ? payerLines.join('\n') : '-'}\n\n` +
 
-                   `🤝 เคลียร์บัญชี (คืนคนออกก่อน):\n${transferLines.length ? transferLines.join('\n') : '-'}\n\n` +
+                   `🤝 เคลียร์บัญชี:\n${transferLines.length ? transferLines.join('\n') : '-'}\n\n` +
 
                    `💸 ติดเงินเรา (รวมทั้งหมด ${fmtNum(totalDebt)}):\n` + 
-                   // แสดงยอดรวมรายคนก่อน
-                   `[ยอดรวมตามชื่อ]\n` +
-                   `${debtSummaryLines.length ? debtSummaryLines.join('\n') : '-'}\n\n` +
-                   // แสดงรายการละเอียดข้างล่าง
-                   `[รายการละเอียดสำหรับลบ]\n` +
+                   // แสดงยอดรวมรายคน
                    `${debtDetailLines.length ? debtDetailLines.join('\n') : '-'}\n\n` +
                    
                    `*หมายเหตุ: พิมพ์ "ส่วนตัว 0" สำหรับคนหารที่ไม่ได้จ่าย`;
@@ -316,15 +312,31 @@ async function handleEvent(event) {
     }
 
     // 4. ดูรายการ
+    // 4. ดูรายการ
     if (p.cmd === 'list_all') {
       const r = await pool.query(`SELECT * FROM entries WHERE group_id=$1 ORDER BY ts ASC LIMIT $2`, [gid, p.limit]);
       if (!r.rows.length) return line.replyMessage(event.replyToken, { type: 'text', text: 'ยังไม่มีรายการ' });
       const withNames = await hydrateNames(r.rows, event.source);
+      
       let text = `🧾 รายการล่าสุด (${r.rows.length})\n`;
       for (const row of withNames) {
+        // --- ส่วนจัดการเรื่องวันเวลา ---
+        const dateObj = new Date(row.ts);
+        const dateTh = dateObj.toLocaleString('th-TH', { 
+          timeZone: 'Asia/Bangkok',
+          day: '2-digit',
+          month: '2-digit',
+          year: '2-digit',
+          hour: '2-digit',
+          minute: '2-digit',
+          hour12: false // ใช้เวลาแบบ 24 ชั่วโมง
+        });
+        
         const tag = row.type === 'center' ? 'กลาง' : row.type === 'debt' ? 'หนี้' : 'ส่วนตัว';
-        text += `- #${row.id} [${tag}] ${fmtNum(row.amount)} ${row.display} ${row.note || ''}\n`;
+        // แสดงผล: - #12 [กลาง] 25/12/68 14:30 | 100 Somchai (หมายเหตุ)
+        text += `- #${row.id} [${tag}] ${dateTh} | ${fmtNum(row.amount)} บ. (${row.display}) ${row.note || ''}\n`;
       }
+      
       const chunks = splitChunks(text);
       return line.replyMessage(event.replyToken, chunks.map(c => ({ type: 'text', text: c })));
     }
