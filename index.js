@@ -292,8 +292,6 @@ async function handleEvent(event) {
 
                    `💸 ติดเงินเรา (${fmtNum(totalDebt)}):\n` + 
                    `[ยอดรวมรายคน]\n` +
-                   `${debtSummaryLines.length ? debtSummaryLines.join('\n') : '-'}\n` +
-                   `[รายการละเอียดสำหรับลบ]\n` +
                    `${debtDetailLines.length ? debtDetailLines.join('\n') : '-'}\n\n` +
                    
                    `*หมายเหตุ: พิมพ์ "ลบ #เลข" เพื่อเคลียร์หนี้`;
