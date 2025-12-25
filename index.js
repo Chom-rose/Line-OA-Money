@@ -57,7 +57,7 @@ function pad(n) { return n.toString().padStart(2, '0'); }
 function fmtNum(n) {
   const num = parseFloat(n);
   if (isNaN(num)) return "0";
-  return num % 1 === 0 ? num.toString() : num.toFixed(2);
+  return num % 1 === 0 ? num.toLocaleString() : num.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 });
 }
 
 function dayRange(dateStr) {
@@ -91,7 +91,6 @@ function parseMessage(text) {
   const t = text.trim();
   const parts = t.split(/\s+/);
 
-  // 1. ระบบติดเงิน
   const debtIndex = parts.indexOf('ติด');
   if (debtIndex !== -1) {
     const numIndex = parts.findIndex(p => !isNaN(parseFloat(p)));
@@ -102,7 +101,6 @@ function parseMessage(text) {
     }
   }
 
-  // 2. บันทึกรายจ่าย
   const m = t.match(/^(กลาง|ส่วนตัว)\s*([0-9]*\.?[0-9]+)\s*(.*)?$/i);
   if (m) {
     return {
@@ -112,7 +110,6 @@ function parseMessage(text) {
     };
   }
 
-  // 3. คำสั่งทั่วไป
   let cmdMatch = t.match(/^ลบ\s*#?(\d+)$/i);
   if (cmdMatch) return { cmd: 'del', id: parseInt(cmdMatch[1]) };
   if (/^สรุปวันนี้$/i.test(t)) return { cmd: 'sum', scope: 'today' };
@@ -133,7 +130,6 @@ function parseMessage(text) {
 async function aggregate(rows) {
   const center = rows.filter(r => r.type === 'center').reduce((a, b) => a + parseFloat(b.amount), 0);
   const debts = rows.filter(r => r.type === 'debt');
-  
   const per = {};
   for (const r of rows) {
     if (r.type === 'advance') {
@@ -148,14 +144,11 @@ async function aggregate(rows) {
 function computeSettlement(per) {
   const ids = Object.keys(per);
   if (!ids.length) return { shareText: '0', transfers: [] };
-  
   const total = ids.reduce((s, id) => s + per[id], 0);
   const share = total / ids.length;
-  
   const nets = ids.map((id) => ({ id, net: per[id] - share }));
   const creditors = nets.filter((x) => x.net > 0).sort((a, b) => b.net - a.net);
   const debtors = nets.filter((x) => x.net < 0).sort((a, b) => a.net - b.net);
-  
   const transfers = [];
   let i = 0, j = 0;
   while (i < creditors.length && j < debtors.length) {
@@ -230,7 +223,6 @@ async function handleEvent(event) {
   }
 
   try {
-    // 1. บันทึก
     if (p.type) {
       const r = await pool.query(`INSERT INTO entries (group_id,user_id,type,amount,note) VALUES ($1,$2,$3,$4,$5) RETURNING id`, [gid, event.source.userId, p.type, p.amount, p.note]);
       const tags = { center: '💸 กองกลางจ่าย', advance: '🙋‍♂️ ออกให้ก่อน', debt: '📝 ติดเงินเรา' };
@@ -240,13 +232,11 @@ async function handleEvent(event) {
       return line.replyMessage(event.replyToken, { type: 'text', text: replyText });
     }
 
-    // 2. ลบ
     if (p.cmd === 'del') {
       await pool.query(`DELETE FROM entries WHERE id=$1 AND group_id=$2`, [p.id, gid]);
       return line.replyMessage(event.replyToken, { type: 'text', text: `ลบรายการ #${p.id} แล้ว` });
     }
 
-    // 3. สรุป
     if (p.cmd === 'sum' || p.cmd === 'sum_all') {
       let rows, title;
       if (p.cmd === 'sum_all') {
@@ -261,7 +251,6 @@ async function handleEvent(event) {
       const { center, per, advanceSum, total, debts } = await aggregate(rows);
       const { shareText, transfers } = computeSettlement(per);
       
-      // รายชื่อคนจ่ายเงิน
       const payerLines = [];
       const payerIds = Object.keys(per).sort((a, b) => per[b] - per[a]);
       for (const id of payerIds) {
@@ -270,7 +259,6 @@ async function handleEvent(event) {
       }
       const peopleCount = payerIds.length;
 
-      // รายการโอนคืน
       const transferLines = [];
       for (const t of transfers) {
         const from = await getDisplayName(event.source, t.from);
@@ -278,15 +266,16 @@ async function handleEvent(event) {
         transferLines.push(`• ${from} → ${to}: ${fmtNum(t.amount)}`);
       }
 
-      // --- ส่วนที่ 1: คำนวณยอดรวมรายคน (Sum Per Person) ---
-      const debtPerPerson = debts.reduce((acc, b) => {
+      // --- จัดการส่วน "ติดหนี้" ---
+      // 1. รวมยอดรายชื่อคนติด
+      const debtSummaryMap = debts.reduce((acc, b) => {
         const name = b.note || 'ไม่ระบุชื่อ';
         acc[name] = (acc[name] || 0) + parseFloat(b.amount);
         return acc;
       }, {});
-      const debtSummaryLines = Object.entries(debtPerPerson).map(([n, v]) => `• ${n}: ${fmtNum(v)}`);
+      const debtSummaryLines = Object.entries(debtSummaryMap).map(([n, v]) => `• ${n}: ${fmtNum(v)} บ.`);
 
-      // --- ส่วนที่ 2: รายการละเอียดรายตัว (Individual Items with ID) ---
+      // 2. รายละเอียดแบบมีเลข #ID (เพื่อเอาไปลบ)
       const debtDetailLines = debts.map(b => `  - #${b.id} ${b.note || '-'}: ${fmtNum(b.amount)}`);
       
       const totalDebt = debts.reduce((sum, b) => sum + parseFloat(b.amount), 0);
@@ -295,48 +284,39 @@ async function handleEvent(event) {
                    `กลางรวม: ${fmtNum(center)}\n` +
                    `รวมส่วนตัว: ${fmtNum(advanceSum)}\n` +
                    `รวมทั้งหมด: ${fmtNum(total)}\n` +
-                   `เฉลี่ยส่วนตัวต่อคน (${peopleCount} คน): ${shareText}\n\n` +
+                   `เฉลี่ยต่อคน (${peopleCount} คน): ${shareText}\n\n` +
 
-                   `รายการคนออกก่อน:\n` +
-                   `${payerLines.length ? payerLines.join('\n') : '-'}\n\n` +
+                   `🙋‍♂️ คนออกก่อน:\n${payerLines.length ? payerLines.join('\n') : '-'}\n\n` +
 
                    `🤝 เคลียร์บัญชี:\n${transferLines.length ? transferLines.join('\n') : '-'}\n\n` +
 
-                   `💸 ติดเงินเรา (รวมทั้งหมด ${fmtNum(totalDebt)}):\n` + 
-                   // แสดงยอดรวมรายคน
+                   `💸 ติดเงินเรา (${fmtNum(totalDebt)}):\n` + 
+                   `[ยอดรวมรายคน]\n` +
+                   `${debtSummaryLines.length ? debtSummaryLines.join('\n') : '-'}\n` +
+                   `[รายการละเอียดสำหรับลบ]\n` +
                    `${debtDetailLines.length ? debtDetailLines.join('\n') : '-'}\n\n` +
                    
-                   `*หมายเหตุ: พิมพ์ "ส่วนตัว 0" สำหรับคนหารที่ไม่ได้จ่าย`;
+                   `*หมายเหตุ: พิมพ์ "ลบ #เลข" เพื่อเคลียร์หนี้`;
 
       return line.replyMessage(event.replyToken, { type: 'text', text });
     }
 
-    // 4. ดูรายการ
-    // 4. ดูรายการ
     if (p.cmd === 'list_all') {
-      const r = await pool.query(`SELECT * FROM entries WHERE group_id=$1 ORDER BY ts ASC LIMIT $2`, [gid, p.limit]);
+      const r = await pool.query(`SELECT * FROM entries WHERE group_id=$1 ORDER BY ts DESC LIMIT $2`, [gid, p.limit]);
       if (!r.rows.length) return line.replyMessage(event.replyToken, { type: 'text', text: 'ยังไม่มีรายการ' });
       const withNames = await hydrateNames(r.rows, event.source);
       
       let text = `🧾 รายการล่าสุด (${r.rows.length})\n`;
       for (const row of withNames) {
-        // --- ส่วนจัดการเรื่องวันเวลา ---
         const dateObj = new Date(row.ts);
         const dateTh = dateObj.toLocaleString('th-TH', { 
           timeZone: 'Asia/Bangkok',
-          day: '2-digit',
-          month: '2-digit',
-          year: '2-digit',
-          hour: '2-digit',
-          minute: '2-digit',
-          hour12: false // ใช้เวลาแบบ 24 ชั่วโมง
+          day: '2-digit', month: '2-digit', year: '2-digit',
+          hour: '2-digit', minute: '2-digit', hour12: false 
         });
-        
         const tag = row.type === 'center' ? 'กลาง' : row.type === 'debt' ? 'หนี้' : 'ส่วนตัว';
-        // แสดงผล: - #12 [กลาง] 25/12/68 14:30 | 100 Somchai (หมายเหตุ)
         text += `- #${row.id} [${tag}] ${dateTh} | ${fmtNum(row.amount)} บ. (${row.display}) ${row.note || ''}\n`;
       }
-      
       const chunks = splitChunks(text);
       return line.replyMessage(event.replyToken, chunks.map(c => ({ type: 'text', text: c })));
     }
